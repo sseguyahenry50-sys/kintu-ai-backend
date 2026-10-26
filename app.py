@@ -1,40 +1,68 @@
 import os
-from flask import Flask, request, Response, jsonify
-from openai import OpenAI
+import requests
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-@app.get('/')
-def health():
-    return jsonify(status='ok', service='Kintu AI backend', endpoint='/chat')
+SYSTEM_PROMPT = """
+You are Kintu AI, a friendly Ugandan AI assistant.
+Use natural Luganda as your main language.
+Use simple British English when helpful.
+If the user writes in English, you may answer in English.
+Be polite, helpful and patient.
+Explain things simply.
+"""
 
-@app.post('/chat')
+@app.route("/", methods=["GET"])
+def home():
+    return "Kintu AI backend is running!"
+
+@app.route("/chat", methods=["POST"])
 def chat():
-    # Supports Kodular form data and JSON requests.
-    data = request.get_json(silent=True) or request.form or request.values
-    message = (data.get('message') or '').strip()
-    if not message:
-        return Response('Please enter a message.', status=400, mimetype='text/plain')
+    api_key = os.environ.get("GROQ_API_KEY")
 
-    api_key = os.getenv('OPENAI_API_KEY')
     if not api_key:
-        return Response('Backend setup error: OPENAI_API_KEY is not configured.', status=500, mimetype='text/plain')
+        return jsonify({"error": "GROQ_API_KEY is missing from Render"}), 500
+
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+
+    if not message:
+        return jsonify({"error": "Please enter a message"}), 400
 
     try:
-        client = OpenAI(api_key=api_key)
-        result = client.responses.create(
-            model=os.getenv('OPENAI_MODEL', 'gpt-4.1-mini'),
-            instructions=(
-                'You are Kintu AI, a friendly assistant for users in Uganda. '
-                'Reply mainly in natural Luganda, using a little British English when helpful. '
-                'Answer in the language the user uses, be respectful and clear, and do not claim to be human.'
-            ),
-            input=message,
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "openai/gpt-oss-20b",
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": message}
+                ],
+                "max_completion_tokens": 700
+            },
+            timeout=60
         )
-        return Response(result.output_text or 'Nsonyiwa, ddamu ogezeeko.', mimetype='text/plain; charset=utf-8')
-    except Exception:
-        app.logger.exception('Kintu AI request failed')
-        return Response('Waliwo ekizibu. Gezaako nate.', status=502, mimetype='text/plain; charset=utf-8')
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', '5000')))
+        if not response.ok:
+            app.logger.error("Groq API returned HTTP %s", response.status_code)
+            return jsonify({"error": "Groq could not answer. Check Render logs."}), 502
+
+        result = response.json()
+        reply = result["choices"][0]["message"]["content"]
+        return jsonify({"reply": reply})
+
+    except requests.RequestException:
+        app.logger.exception("Groq connection failed")
+        return jsonify({"error": "Connection problem. Please try again."}), 502
+
+    except (KeyError, IndexError, TypeError):
+        app.logger.exception("Unexpected Groq response")
+        return jsonify({"error": "Unexpected AI response."}), 502
+
+if __name__ == "__main__":
+    app.run()
