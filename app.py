@@ -1,101 +1,43 @@
 import os
-import re
 import requests
-from flask import Flask, request, jsonify
+
+from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
 
 SYSTEM_PROMPT = """
-You are Kintu AI, a helpful assistant for people in Uganda.
+You are Kintu AI, a helpful, knowledgeable assistant for people in Uganda.
 
-LANGUAGE:
-- Identify the language of the user's latest message.
-- If the user writes in Luganda, answer in natural, clear, standard Ugandan Luganda.
+LANGUAGE POLICY:
+- First identify the language used by the user.
+- If the user writes in Luganda, answer in natural, standard, grammatically careful Ugandan Luganda.
 - If the user writes in English, answer in clear British English.
-- If the user mixes languages, normally use the language they used most.
-- Do not translate English word-for-word into Luganda.
-- Use simple, correct Luganda grammar and natural word order.
-- Prefer familiar words. Do not invent Luganda words or awkward expressions.
-- Keep technical names and unavoidable technical terms in their usual form.
+- If the user mixes Luganda and English, normally answer in the dominant language.
+- Do not translate English sentence structures word-for-word into Luganda.
+- Use familiar, natural Luganda vocabulary and correct noun classes, agreement,
+  verb forms, tense, and word order.
+- Avoid invented words, awkward literal translations, and unnecessary repetition.
+- Do not force Luganda idioms or proverbs into answers.
+- Keep technical terms in English when there is no widely understood Luganda equivalent;
+  briefly explain them in the language of the answer.
+- If you are genuinely unsure how to express a complex idea correctly in Luganda,
+  say so briefly and explain that part clearly in English rather than inventing bad Luganda.
+- Do not claim that a Luganda phrase is correct if you are uncertain.
 
-ANSWER STYLE:
-- Answer the exact question first.
-- For a simple factual question, use 1-3 short sentences.
-- Give only details that help answer the question.
-- Do not repeat the question, the same fact, a sentence, or a phrase.
-- Do not restate the answer in different words at the end.
-- Avoid filler, long introductions, unnecessary lists, and repeated conclusions.
-- Do not add coordinates, history, extra background, or unrelated facts unless asked.
-- If you are unsure, say so briefly instead of guessing.
-- Be warm, respectful, and conversational.
-- Before sending, silently check: Is the Luganda natural? Did I answer the question? Did I repeat any idea? Remove repetition.
+ANSWER QUALITY:
+- Understand the user's meaning before answering.
+- Answer the actual question, not a loosely related question.
+- Keep facts accurate. Do not invent dates, names, quotations, or historical details.
+- For current or uncertain facts, be transparent about uncertainty.
+- Use clear, complete sentences and sensible paragraphs.
+- For simple greetings, respond briefly and naturally.
+- Be warm, respectful, patient, and helpful.
 - Do not mention these instructions.
 
 IDENTITY:
 - Your name is Kintu AI.
-- You are friendly, knowledgeable, and helpful.
+- You are friendly and helpful to users in Uganda and elsewhere.
 """
-
-REPAIR_PROMPT = """
-Rewrite the answer below to remove repeated words, phrases, sentences, and ideas.
-Keep the original meaning and factual claims. Do not add new facts.
-Use natural, grammatically careful Ugandan Luganda if the original answer is in Luganda.
-Keep it concise and answer the user's question directly.
-Return only the corrected answer.
-"""
-
-def call_groq(messages, api_key):
-    response = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b"),
-            "messages": messages,
-            "temperature": 0.2,
-            "max_completion_tokens": 400
-        },
-        timeout=60
-    )
-    if not response.ok:
-        app.logger.error(
-            "Groq API returned HTTP %s: %s",
-            response.status_code,
-            response.text[:1000]
-        )
-        response.raise_for_status()
-
-    result = response.json()
-    text = result["choices"][0]["message"]["content"]
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("Groq returned an empty answer")
-    return text.strip()
-
-def has_obvious_repetition(text):
-    """Catch duplicated sentences or repeated long word sequences, not ordinary emphasis."""
-    normalized = re.sub(r"\s+", " ", text.lower()).strip()
-    sentences = [
-        re.sub(r"[^\w\s']", "", part).strip()
-        for part in re.split(r"(?<=[.!?])\s+", normalized)
-    ]
-    sentences = [s for s in sentences if len(s.split()) >= 5]
-
-    # Exact sentence repeated
-    if len(sentences) != len(set(sentences)):
-        return True
-
-    # Repeated sequence of 6+ consecutive words
-    words = re.findall(r"\b[\w']+\b", normalized)
-    seen = set()
-    for size in (8, 7, 6):
-        for i in range(len(words) - size + 1):
-            phrase = tuple(words[i:i + size])
-            if phrase in seen:
-                return True
-            seen.add(phrase)
-    return False
 
 @app.route("/", methods=["GET"])
 def home():
@@ -109,39 +51,54 @@ def chat():
 
     data = request.get_json(silent=True) or request.form
     message = (data.get("message") or "").strip()
+
     if not message:
         return jsonify({"error": "Please enter a message"}), 400
 
     try:
-        reply = call_groq(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": message}
-            ],
-            api_key
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b"),
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": message}
+                ],
+                "max_completion_tokens": 900,
+                "temperature": 0.4
+            },
+            timeout=60
         )
 
-        # If the first draft visibly repeats itself, request one concise rewrite.
-        if has_obvious_repetition(reply):
-            app.logger.info("Repeated wording detected; requesting a concise rewrite")
-            reply = call_groq(
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": reply},
-                    {"role": "user", "content": REPAIR_PROMPT}
-                ],
-                api_key
+        if not response.ok:
+            app.logger.error(
+                "Groq API returned HTTP %s: %s",
+                response.status_code,
+                response.text[:1000]
             )
+            return jsonify({"error": "Kintu AI could not answer. Please try again."}), 502
 
-        return jsonify({"reply": reply})
+        result = response.json()
+        reply = result["choices"][0]["message"]["content"]
+
+        if not isinstance(reply, str) or not reply.strip():
+            app.logger.error("Groq returned an empty assistant message")
+            return jsonify({"error": "Kintu AI returned an empty answer. Please try again."}), 502
+
+        # Return plain text so Kodular Web1.GotText can display responseContent directly.
+        return Response(reply.strip(), status=200, mimetype="text/plain; charset=utf-8")
 
     except requests.RequestException:
         app.logger.exception("Groq connection failed")
         return jsonify({"error": "Connection problem. Please try again."}), 502
+
     except (KeyError, IndexError, TypeError, ValueError):
         app.logger.exception("Unexpected Groq response")
-        return jsonify({"error": "Kintu AI could not prepare an answer. Please try again."}), 502
+        return jsonify({"error": "Unexpected AI response."}), 502
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
