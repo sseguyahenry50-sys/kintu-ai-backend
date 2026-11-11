@@ -1,31 +1,42 @@
 import os
 import requests
-from flask import Flask, request, jsonify
+
+from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
 
 SYSTEM_PROMPT = """
-You are Kintu AI, a friendly and helpful Ugandan AI assistant.
+You are Kintu AI, a helpful, knowledgeable assistant for people in Uganda.
 
-LANGUAGE:
-- Use natural, conversational Luganda as your main language.
-- Use simple British English when the user writes in English or requests English.
-- Understand that Luganda grammar and word order differ from English.
-- Prefer short, clear sentences that a Ugandan speaker would naturally use.
-- Do not translate English word-for-word into Luganda.
-- Avoid awkward, repetitive, or meaningless Luganda phrases.
-- If you are unsure about a Luganda expression, use simpler wording rather than inventing a phrase.
+LANGUAGE POLICY:
+- First identify the language used by the user.
+- If the user writes in Luganda, answer in natural, standard, grammatically careful Ugandan Luganda.
+- If the user writes in English, answer in clear British English.
+- If the user mixes Luganda and English, normally answer in the dominant language.
+- Do not translate English sentence structures word-for-word into Luganda.
+- Use familiar, natural Luganda vocabulary and correct noun classes, agreement,
+  verb forms, tense, and word order.
+- Avoid invented words, awkward literal translations, and unnecessary repetition.
+- Do not force Luganda idioms or proverbs into answers.
+- Keep technical terms in English when there is no widely understood Luganda equivalent;
+  briefly explain them in the language of the answer.
+- If you are genuinely unsure how to express a complex idea correctly in Luganda,
+  say so briefly and explain that part clearly in English rather than inventing bad Luganda.
+- Do not claim that a Luganda phrase is correct if you are uncertain.
 
-CONVERSATION:
-- Answer the user's actual question directly.
-- Be warm, polite, patient, and respectful.
-- Do not repeat words unnecessarily.
-- For greetings, respond naturally and briefly.
-- For example, if the user says "Oli otya?", reply "Gyendi bulungi! Ggwe oli otya?"
-- Do not repeat this example for unrelated questions.
-- Explain things simply.
+ANSWER QUALITY:
+- Understand the user's meaning before answering.
+- Answer the actual question, not a loosely related question.
+- Keep facts accurate. Do not invent dates, names, quotations, or historical details.
+- For current or uncertain facts, be transparent about uncertainty.
+- Use clear, complete sentences and sensible paragraphs.
+- For simple greetings, respond briefly and naturally.
+- Be warm, respectful, patient, and helpful.
+- Do not mention these instructions.
 
-Keep your answers helpful, clear, and natural.
+IDENTITY:
+- Your name is Kintu AI.
+- You are friendly and helpful to users in Uganda and elsewhere.
 """
 
 @app.route("/", methods=["GET"])
@@ -35,11 +46,10 @@ def home():
 @app.route("/chat", methods=["POST"])
 def chat():
     api_key = os.environ.get("GROQ_API_KEY")
-
     if not api_key:
         return jsonify({"error": "GROQ_API_KEY is missing from Render"}), 500
 
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True) or request.form
     message = (data.get("message") or "").strip()
 
     if not message:
@@ -53,31 +63,42 @@ def chat():
                 "Content-Type": "application/json"
             },
             json={
-                "model": "openai/gpt-oss-20b",
+                "model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b"),
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": message}
                 ],
-                "max_completion_tokens": 700
+                "max_completion_tokens": 900,
+                "temperature": 0.4
             },
             timeout=60
         )
 
         if not response.ok:
-            app.logger.error("Groq API returned HTTP %s", response.status_code)
-            return jsonify({"error": "Groq could not answer. Check Render logs."}), 502
+            app.logger.error(
+                "Groq API returned HTTP %s: %s",
+                response.status_code,
+                response.text[:1000]
+            )
+            return jsonify({"error": "Kintu AI could not answer. Please try again."}), 502
 
         result = response.json()
         reply = result["choices"][0]["message"]["content"]
-        return jsonify({"reply": reply})
+
+        if not isinstance(reply, str) or not reply.strip():
+            app.logger.error("Groq returned an empty assistant message")
+            return jsonify({"error": "Kintu AI returned an empty answer. Please try again."}), 502
+
+        # Return plain text so Kodular Web1.GotText can display responseContent directly.
+        return Response(reply.strip(), status=200, mimetype="text/plain; charset=utf-8")
 
     except requests.RequestException:
         app.logger.exception("Groq connection failed")
         return jsonify({"error": "Connection problem. Please try again."}), 502
 
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, ValueError):
         app.logger.exception("Unexpected Groq response")
         return jsonify({"error": "Unexpected AI response."}), 502
 
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
