@@ -138,6 +138,75 @@ def chat():
             "error": "Unexpected AI response."
         }), 502
 
+@app.route("/generate-image", methods=["POST"])
+def generate_image():
+    api_key = os.environ.get("OPENAI_API_KEY")
+
+    if not api_key:
+        return jsonify({
+            "error": "OPENAI_API_KEY is missing from Render"
+        }), 500
+
+    data = request.get_json(silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+
+    if not prompt:
+        return jsonify({
+            "error": "Please describe the image you want"
+        }), 400
+
+    if len(prompt) > 4000:
+        return jsonify({
+            "error": "Your image description is too long"
+        }), 400
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "gpt-image-2.5-flare",
+                "prompt": prompt,
+                "size": "1024x1024",
+                "n": 1,
+                "output_format": "png"
+            },
+            timeout=180
+        )
+
+        if not response.ok:
+            app.logger.error(
+                "OpenAI image API error: HTTP %s - %s",
+                response.status_code,
+                response.text[:1000]
+            )
+            return jsonify({
+                "error": "Image generation failed. Please try again."
+            }), 502
+
+        result = response.json()
+        image_data = result["data"][0]["b64_json"]
+
+        return jsonify({
+            "success": True,
+            "image_data": image_data,
+            "format": "png"
+        })
+
+    except requests.RequestException:
+        app.logger.exception("OpenAI image connection failed")
+        return jsonify({
+            "error": "Connection problem. Please try again."
+        }), 502
+
+    except (KeyError, IndexError, TypeError, ValueError):
+        app.logger.exception("Unexpected image response")
+        return jsonify({
+            "error": "Unexpected image response."
+        }), 502
 
 if __name__ == "__main__":
     app.run(
