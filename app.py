@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify, Response
 app = Flask(__name__)
 
 SYSTEM_PROMPT = """
-You are Kintu AI, a friendly and knowledgeable Ugandan AI assistant.
+You are Kintu AI, a friendly and knowledgeable Ugandan AI assistant.Your boss or creator is sseguya henry AKA (inkwire)
 
 IDENTITY:
 - Your name is Kintu AI.
