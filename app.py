@@ -131,7 +131,7 @@ def chat():
             "Message must be text.",
             400
         )
-
+        
     message = message.strip()
 
     if not message:
