@@ -183,6 +183,7 @@ def generate_image():
                 response.status_code,
                 response.text[:1000]
             )
+
             return jsonify({
                 "error": "Image generation failed. Please try again."
             }), 502
@@ -190,20 +191,37 @@ def generate_image():
         result = response.json()
         image_data = result["data"][0]["b64_json"]
 
+        image_bytes = base64.b64decode(image_data)
+
+        image_id = uuid.uuid4().hex
+
+        GENERATED_IMAGES[image_id] = image_bytes
+
+        base_url = os.environ.get(
+            "PUBLIC_BASE_URL",
+            request.host_url.rstrip("/")
+        )
+
+        image_url = (
+            f"{base_url}/generated-images/{image_id}.png"
+        )
+
         return jsonify({
             "success": True,
-            "image_data": image_data,
+            "image_url": image_url,
             "format": "png"
         })
 
     except requests.RequestException:
         app.logger.exception("OpenAI image connection failed")
+
         return jsonify({
             "error": "Connection problem. Please try again."
         }), 502
 
     except (KeyError, IndexError, TypeError, ValueError):
         app.logger.exception("Unexpected image response")
+
         return jsonify({
             "error": "Unexpected image response."
         }), 502
