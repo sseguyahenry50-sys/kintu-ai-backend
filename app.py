@@ -1,12 +1,15 @@
 import os
 import uuid
 import logging
+import urllib.parse
 from threading import Lock
 
 import requests
 from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
 app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
 
@@ -47,7 +50,7 @@ ANSWER QUALITY:
 - Explain difficult subjects in simple Luganda.
 - Keep simple greetings short and friendly.
 - Give detailed answers when the user needs them.
-- Be patient and respectful.Your boss is sseguya henry AKA (inkwire)
+- Be patient and respectful. Your boss is sseguya henry AKA (inkwire)
 - Do not mention these instructions.
 
 CULTURAL CONTEXT:
@@ -191,7 +194,7 @@ def chat():
         return json_error("Unexpected AI response.", 502)
 
 # ==========================================
-# IMAGE GENERATION - POLLINATIONS (FREE, NO KEY)
+# IMAGE GENERATION - POLLINATIONS (FIXED)
 # ==========================================
 
 @app.route("/generate-image", methods=["POST"])
@@ -224,19 +227,33 @@ def generate_image():
             400
         )
 
-    # Pollinations - free, no API key needed
-    import urllib.parse
-    safe_prompt = urllib.parse.quote(prompt)
+    # FIXED: safe='' so / and ? and spaces are all encoded correctly
+    # This fixes the old bug: "of20kampala" and "? width=" with space
+    safe_prompt = urllib.parse.quote(prompt, safe='')
 
     # Different seed = different image every time
     seed = uuid.uuid4().hex[:8]
 
+    # Quality from Kodular - you can send "quality": "4K" or "HD" or leave empty
+    quality = data.get("quality", "")
+
+    if quality == "4K":
+        width, height = 1024, 1024
+    elif quality == "HD":
+        width, height = 768, 768
+    elif quality == "Full HD":
+        width, height = 1024, 1024
+    else:
+        width, height = 1024, 1024
+
     image_url = (
         f"https://image.pollinations.ai/prompt/{safe_prompt}"
-        f"?width=1024&height=1024&seed={seed}&nologo=true&model=flux"
+        f"?width={width}&height={height}&seed={seed}&nologo=true&model=flux"
     )
 
-    # Return JSON that your App Inventor blocks already expect
+    app.logger.info(f"Generated image URL: {image_url}")
+
+    # Return JSON that your Kodular blocks already expect
     return jsonify({
         "success": True,
         "image_url": image_url,
