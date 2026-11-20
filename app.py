@@ -1,5 +1,6 @@
 import os
 import uuid
+import base64
 import logging
 import urllib.parse
 from threading import Lock
@@ -11,7 +12,8 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
+# CHANGED: 10MB for photos, was 1MB
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -59,7 +61,6 @@ CULTURAL CONTEXT:
 - Do not assume every user lives in Kampala.
 """
 
-# Temporary image storage - kept for old images, not needed for Pollinations
 GENERATED_IMAGES = {}
 GENERATED_IMAGES_LOCK = Lock()
 
@@ -73,10 +74,6 @@ def json_error(message, status_code):
         "error": message
     }), status_code
 
-# ==========================================
-# HOME ROUTE
-# ==========================================
-
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
@@ -84,13 +81,10 @@ def home():
         "message": "Kintu AI backend is running!",
         "endpoints": [
             "/chat",
-            "/generate-image"
+            "/generate-image",
+            "/describe-image"
         ]
     })
-
-# ==========================================
-# HEALTH CHECK
-# ==========================================
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -105,38 +99,21 @@ def health():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-
     api_key = os.environ.get("GROQ_API_KEY")
-
     if not api_key:
         app.logger.error("GROQ_API_KEY is missing")
-        return json_error(
-            "Chat service is not configured.",
-            500
-        )
-
+        return json_error("Chat service is not configured.", 500)
     data = request.get_json(silent=True)
-
     if not isinstance(data, dict):
         data = request.form
-
     message = data.get("message", "")
-
     if not isinstance(message, str):
         return json_error("Message must be text.", 400)
-        
     message = message.strip()
-
     if not message:
         return json_error("Please enter a message.", 400)
-
-    model = os.environ.get(
-        "GROQ_MODEL",
-        "qwen/qwen3.8-27b"
-    )
-
+    model = os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b")
     try:
-
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={
@@ -154,89 +131,44 @@ def chat():
             },
             timeout=(15, 60)
         )
-
         if not response.ok:
-            app.logger.error(
-                "Groq error HTTP %s: %s",
-                response.status_code,
-                response.text[:1000]
-            )
-            return json_error(
-                "Kintu AI could not answer. Please try again.",
-                502
-            )
-
+            app.logger.error("Groq error HTTP %s: %s", response.status_code, response.text[:1000])
+            return json_error("Kintu AI could not answer. Please try again.", 502)
         result = response.json()
         reply = result["choices"][0]["message"]["content"]
-
         if not isinstance(reply, str) or not reply.strip():
-            return json_error(
-                "Kintu AI returned an empty answer.",
-                502
-            )
-
-        return Response(
-            reply.strip(),
-            status=200,
-            mimetype="text/plain; charset=utf-8"
-        )
-
+            return json_error("Kintu AI returned an empty answer.", 502)
+        return Response(reply.strip(), status=200, mimetype="text/plain; charset=utf-8")
     except requests.Timeout:
         app.logger.exception("Groq request timed out")
         return json_error("Kintu AI took too long to respond.", 504)
-
     except requests.RequestException:
         app.logger.exception("Groq connection failed")
         return json_error("Connection problem. Please try again.", 502)
-
     except (KeyError, IndexError, TypeError, ValueError):
         app.logger.exception("Unexpected Groq response")
         return json_error("Unexpected AI response.", 502)
 
 # ==========================================
-# IMAGE GENERATION - POLLINATIONS (FIXED)
+# IMAGE GENERATION - POLLINATIONS (UNCHANGED)
 # ==========================================
 
 @app.route("/generate-image", methods=["POST"])
 def generate_image():
-
     data = request.get_json(silent=True)
-
     if not isinstance(data, dict):
-        return json_error(
-            'Send JSON containing a "prompt" field.',
-            400
-        )
-
+        return json_error('Send JSON containing a "prompt" field.', 400)
     prompt = data.get("prompt", "")
-
     if not isinstance(prompt, str):
         return json_error("Prompt must be text.", 400)
-
     prompt = prompt.strip()
-
     if not prompt:
-        return json_error(
-            "Please describe the image you want.",
-            400
-        )
-
+        return json_error("Please describe the image you want.", 400)
     if len(prompt) > 4000:
-        return json_error(
-            "Your image description is too long.",
-            400
-        )
-
-    # FIXED: safe='' so / and ? and spaces are all encoded correctly
-    # This fixes the old bug: "of20kampala" and "? width=" with space
+        return json_error("Your image description is too long.", 400)
     safe_prompt = urllib.parse.quote(prompt, safe='')
-
-    # Different seed = different image every time
     seed = uuid.uuid4().hex[:8]
-
-    # Quality from Kodular - you can send "quality": "4K" or "HD" or leave empty
     quality = data.get("quality", "")
-
     if quality == "4K":
         width, height = 1024, 1024
     elif quality == "HD":
@@ -245,15 +177,11 @@ def generate_image():
         width, height = 1024, 1024
     else:
         width, height = 1024, 1024
-
     image_url = (
         f"https://image.pollinations.ai/prompt/{safe_prompt}"
         f"?width={width}&height={height}&seed={seed}&nologo=true&model=flux"
     )
-
     app.logger.info(f"Generated image URL: {image_url}")
-
-    # Return JSON that your Kodular blocks already expect
     return jsonify({
         "success": True,
         "image_url": image_url,
@@ -261,25 +189,119 @@ def generate_image():
     }), 200
 
 # ==========================================
-# DISPLAY OLD GENERATED IMAGES (kept, not needed for Pollinations)
+# NEW: UNDERSTAND + DESCRIBE IMAGES - GEMINI
 # ==========================================
 
-@app.route(
-    "/generated-images/<image_id>.png",
-    methods=["GET"]
-)
-def get_generated_image(image_id):
+@app.route("/describe-image", methods=["POST"])
+def describe_image():
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_key:
+        app.logger.error("GEMINI_API_KEY is missing")
+        return json_error("Image understanding is not configured.", 500)
 
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return json_error('Send JSON with "image" and "prompt".', 400)
+
+    # Kodular can send "prompt" or "message" - accept both
+    prompt = data.get("prompt", "") or data.get("message", "") or "Describe this image in detail"
+    if not isinstance(prompt, str):
+        prompt = str(prompt)
+    prompt = prompt.strip() or "Describe this image in detail"
+
+    image_b64 = data.get("image", "") or data.get("image_base64", "")
+    image_url = data.get("image_url", "")
+
+    mime_type = "image/jpeg"
+    image_bytes_b64 = ""
+
+    # Option 1: Kodular sends base64
+    if isinstance(image_b64, str) and len(image_b64) > 100:
+        # Remove "data:image/jpeg;base64," if present
+        if "," in image_b64 and "base64" in image_b64[:50]:
+            parts = image_b64.split(",", 1)
+            image_b64 = parts[1]
+            # Try to detect mime from header
+            if "png" in parts[0]:
+                mime_type = "image/png"
+            elif "webp" in parts[0]:
+                mime_type = "image/webp"
+        image_bytes_b64 = image_b64
+
+    # Option 2: Kodular sends an image_url
+    elif isinstance(image_url, str) and image_url.startswith("http"):
+        try:
+            img_resp = requests.get(image_url, timeout=20)
+            if not img_resp.ok:
+                return json_error("Could not download image from URL.", 400)
+            # Guess mime
+            content_type = img_resp.headers.get("Content-Type", "image/jpeg")
+            if "png" in content_type:
+                mime_type = "image/png"
+            elif "webp" in content_type:
+                mime_type = "image/webp"
+            else:
+                mime_type = "image/jpeg"
+            image_bytes_b64 = base64.b64encode(img_resp.content).decode("utf-8")
+        except requests.RequestException:
+            return json_error("Could not download image from URL.", 502)
+
+    if not image_bytes_b64:
+        return json_error("Please send an image. Use 'image' as base64 or 'image_url'.", 400)
+
+    # Send to Gemini - uses your SYSTEM_PROMPT so it answers in Luganda like Kintu
+    try:
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+        gemini_payload = {
+            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime_type, "data": image_bytes_b64}}
+                ]
+            }],
+            "generationConfig": {"temperature": 0.4, "maxOutputTokens": 900}
+        }
+        g_resp = requests.post(gemini_url, json=gemini_payload, timeout=(15, 60))
+        if not g_resp.ok:
+            app.logger.error("Gemini error %s: %s", g_resp.status_code, g_resp.text[:1000])
+            return json_error("Kintu AI could not understand this image. Try again.", 502)
+
+        result = g_resp.json()
+        # Extract text
+        description = ""
+        try:
+            candidates = result.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                description = "".join([p.get("text", "") for p in parts]).strip()
+        except Exception:
+            pass
+
+        if not description:
+            return json_error("Kintu AI returned an empty answer.", 502)
+
+        return jsonify({
+            "success": True,
+            "description": description
+        }), 200
+
+    except requests.Timeout:
+        return json_error("Kintu AI took too long to look at the image.", 504)
+    except Exception:
+        app.logger.exception("Describe image failed")
+        return json_error("Could not understand image.", 502)
+
+# ==========================================
+# DISPLAY OLD GENERATED IMAGES
+# ==========================================
+
+@app.route("/generated-images/<image_id>.png", methods=["GET"])
+def get_generated_image(image_id):
     with GENERATED_IMAGES_LOCK:
         image_bytes = GENERATED_IMAGES.get(image_id)
-
     if image_bytes is None:
-        return Response(
-            "Image not found. It may have expired.",
-            status=404,
-            mimetype="text/plain"
-        )
-
+        return Response("Image not found. It may have expired.", status=404, mimetype="text/plain")
     return Response(
         image_bytes,
         status=200,
@@ -290,17 +312,9 @@ def get_generated_image(image_id):
         }
     )
 
-# ==========================================
-# ERROR HANDLING
-# ==========================================
-
 @app.errorhandler(413)
 def request_too_large(error):
-    return json_error("Request is too large.", 413)
-
-# ==========================================
-# START SERVER
-# ==========================================
+    return json_error("Image is too large. Try a smaller photo.", 413)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
