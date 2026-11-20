@@ -12,7 +12,7 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# CHANGED: 10MB for photos, was 1MB
+# 10MB for photos
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 logging.basicConfig(
@@ -189,7 +189,11 @@ def generate_image():
     }), 200
 
 # ==========================================
-# NEW: UNDERSTAND + DESCRIBE IMAGES - GEMINI
+# NEW: DESCRIBE IMAGE - GEMINI
+# Supports 3 ways:
+# 1. PostFile from Kodular (file upload) - NO EXTENSION NEEDED
+# 2. JSON Base64 (old way)
+# 3. JSON image_url
 # ==========================================
 
 @app.route("/describe-image", methods=["POST"])
@@ -199,57 +203,83 @@ def describe_image():
         app.logger.error("GEMINI_API_KEY is missing")
         return json_error("Image understanding is not configured.", 500)
 
+    # --- Get prompt from ANY place Kodular might send it ---
+    # URL ?prompt=..., form, or JSON
+    prompt = ""
+    # 1. URL query: /describe-image?prompt=What is this?
+    prompt = request.args.get("prompt", "") or ""
+    # 2. Form field (when using PostFile)
+    if not prompt:
+        prompt = request.form.get("prompt", "") or request.form.get("message", "") or ""
+    # 3. JSON body
     data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return json_error('Send JSON with "image" and "prompt".', 400)
-
-    # Kodular can send "prompt" or "message" - accept both
-    prompt = data.get("prompt", "") or data.get("message", "") or "Describe this image in detail"
+    if not prompt and isinstance(data, dict):
+        prompt = data.get("prompt", "") or data.get("message", "") or ""
     if not isinstance(prompt, str):
         prompt = str(prompt)
     prompt = prompt.strip() or "Describe this image in detail"
 
-    image_b64 = data.get("image", "") or data.get("image_base64", "")
-    image_url = data.get("image_url", "")
-
     mime_type = "image/jpeg"
-    image_bytes_b64 = ""
+    image_bytes = None
 
-    # Option 1: Kodular sends base64
-    if isinstance(image_b64, str) and len(image_b64) > 100:
-        # Remove "data:image/jpeg;base64," if present
-        if "," in image_b64 and "base64" in image_b64[:50]:
-            parts = image_b64.split(",", 1)
-            image_b64 = parts[1]
-            # Try to detect mime from header
-            if "png" in parts[0]:
-                mime_type = "image/png"
-            elif "webp" in parts[0]:
-                mime_type = "image/webp"
-        image_bytes_b64 = image_b64
+    # --- WAY 1: FILE UPLOAD from Kodular PostFile ---
+    # Kodular PostFile sends file under key "image" or as any file
+    if request.files:
+        # Try common keys first
+        file_obj = request.files.get("image")
+        if file_obj is None and len(request.files) > 0:
+            # Take first file whatever its name is
+            file_obj = list(request.files.values())[0]
+        if file_obj is not None and file_obj.filename:
+            try:
+                image_bytes = file_obj.read()
+                fname = file_obj.filename.lower()
+                if fname.endswith(".png"):
+                    mime_type = "image/png"
+                elif fname.endswith(".webp"):
+                    mime_type = "image/webp"
+                elif fname.endswith(".jpg") or fname.endswith(".jpeg"):
+                    mime_type = "image/jpeg"
+            except Exception:
+                app.logger.exception("Failed to read uploaded file")
 
-    # Option 2: Kodular sends an image_url
-    elif isinstance(image_url, str) and image_url.startswith("http"):
-        try:
-            img_resp = requests.get(image_url, timeout=20)
-            if not img_resp.ok:
-                return json_error("Could not download image from URL.", 400)
-            # Guess mime
-            content_type = img_resp.headers.get("Content-Type", "image/jpeg")
-            if "png" in content_type:
-                mime_type = "image/png"
-            elif "webp" in content_type:
-                mime_type = "image/webp"
-            else:
-                mime_type = "image/jpeg"
-            image_bytes_b64 = base64.b64encode(img_resp.content).decode("utf-8")
-        except requests.RequestException:
-            return json_error("Could not download image from URL.", 502)
+    # --- WAY 2: JSON Base64 ---
+    if image_bytes is None and isinstance(data, dict):
+        image_b64 = data.get("image", "") or data.get("image_base64", "")
+        if isinstance(image_b64, str) and len(image_b64) > 100:
+            if "," in image_b64 and "base64" in image_b64[:50]:
+                parts = image_b64.split(",", 1)
+                image_b64 = parts[1]
+                if "png" in parts[0]:
+                    mime_type = "image/png"
+                elif "webp" in parts[0]:
+                    mime_type = "image/webp"
+            try:
+                image_bytes = base64.b64decode(image_b64)
+            except Exception:
+                pass
 
-    if not image_bytes_b64:
-        return json_error("Please send an image. Use 'image' as base64 or 'image_url'.", 400)
+    # --- WAY 3: JSON image_url ---
+    if image_bytes is None and isinstance(data, dict):
+        image_url = data.get("image_url", "") or request.args.get("image_url", "")
+        if isinstance(image_url, str) and image_url.startswith("http"):
+            try:
+                img_resp = requests.get(image_url, timeout=20)
+                if img_resp.ok:
+                    image_bytes = img_resp.content
+                    ct = img_resp.headers.get("Content-Type", "image/jpeg")
+                    if "png" in ct:
+                        mime_type = "image/png"
+                    elif "webp" in ct:
+                        mime_type = "image/webp"
+            except requests.RequestException:
+                pass
 
-    # Send to Gemini - uses your SYSTEM_PROMPT so it answers in Luganda like Kintu
+    if not image_bytes:
+        return json_error("Please send an image. Use PostFile, or JSON with 'image' base64.", 400)
+
+    image_bytes_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
     try:
         gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
         gemini_payload = {
@@ -268,7 +298,6 @@ def describe_image():
             return json_error("Kintu AI could not understand this image. Try again.", 502)
 
         result = g_resp.json()
-        # Extract text
         description = ""
         try:
             candidates = result.get("candidates", [])
