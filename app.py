@@ -1,4 +1,3 @@
-
 import os
 import uuid
 import base64
@@ -134,17 +133,18 @@ def health():
     })
 
 
+
 # ==========================================
-# KINTU AI CHAT - GROQ
+# KINTU AI CHAT - OPENAI (CHATGPT)
 # ==========================================
 
 @app.route("/chat", methods=["POST"])
 def chat():
 
-    api_key = os.environ.get("GROQ_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
 
     if not api_key:
-        app.logger.error("GROQ_API_KEY is missing")
+        app.logger.error("OPENAI_API_KEY is missing")
         return json_error(
             "Chat service is not configured.",
             500
@@ -169,13 +169,13 @@ def chat():
         )
 
     model = os.environ.get(
-        "GROQ_MODEL",
-        "qwen/qwen3.8-27b"
+        "OPENAI_MODEL",
+        "gpt-4.1-mini"
     )
 
     try:
         response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
+            "https://api.openai.com/v1/chat/completions",
 
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -205,7 +205,7 @@ def chat():
 
         if not response.ok:
             app.logger.error(
-                "Groq error HTTP %s: %s",
+                "OpenAI error HTTP %s: %s",
                 response.status_code,
                 response.text[:1000]
             )
@@ -232,7 +232,7 @@ def chat():
         )
 
     except requests.Timeout:
-        app.logger.exception("Groq request timed out")
+        app.logger.exception("OpenAI request timed out")
 
         return json_error(
             "Kintu AI took too long to respond.",
@@ -240,7 +240,7 @@ def chat():
         )
 
     except requests.RequestException:
-        app.logger.exception("Groq connection failed")
+        app.logger.exception("OpenAI connection failed")
 
         return json_error(
             "Connection problem. Please try again.",
@@ -248,7 +248,7 @@ def chat():
         )
 
     except (KeyError, IndexError, TypeError, ValueError):
-        app.logger.exception("Unexpected Groq response")
+        app.logger.exception("Unexpected OpenAI response")
 
         return json_error(
             "Unexpected AI response.",
@@ -791,3 +791,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
+
